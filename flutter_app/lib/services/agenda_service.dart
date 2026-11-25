@@ -1,19 +1,10 @@
 import 'package:supabase_flutter/supabase_flutter.dart';
 import '../models/agenda_number_model.dart';
+import '../repositories/agenda_repository.dart';
 
-/// Service for agenda number operations — calls Supabase RPC functions.
-///
-/// All numbering logic (transactions, locking) lives in PostgreSQL functions.
-/// This service is a thin wrapper that calls them via `supabase.rpc()`.
-///
-/// Note: User identity (dibuat_oleh) is determined inside the Postgres
-/// function via `auth.uid()` — we do NOT send user_id from the client.
-class AgendaService {
+class AgendaService implements IAgendaRepository {
   SupabaseClient get _supabase => Supabase.instance.client;
 
-  /// Issue a number for today (mode: hari_ini)
-  /// Calls RPC `issue_today_number` — transaction + FOR UPDATE locking
-  /// auth.uid() is used inside the function for dibuat_oleh
   Future<AgendaNumberModel> issueTodayNumber({
     required String kategori,
     required String kodeKlasifikasi,
@@ -30,7 +21,6 @@ class AgendaService {
         'p_pemohon': pemohon,
       });
 
-      // RPC RETURNS agenda_numbers → PostgREST serializes composite type as JSON
       final data = response as Map<String, dynamic>;
       return AgendaNumberModel.fromJson(data);
     } catch (e) {
@@ -39,9 +29,6 @@ class AgendaService {
     }
   }
 
-  /// Issue a backdate number (mode: backdate)
-  /// Calls RPC `issue_backdate_number` — takes 1 buffer for the given date
-  /// auth.uid() is used inside the function for dibuat_oleh
   Future<AgendaNumberModel> issueBackdateNumber({
     required DateTime tanggal,
     required String kategori,
@@ -71,8 +58,6 @@ class AgendaService {
     }
   }
 
-  /// Generate daily buffer for a specific date (dev tool / manual trigger)
-  /// Calls RPC `generate_daily_buffer`
   Future<void> generateDailyBuffer(DateTime tanggal) async {
     try {
       final dateStr =
@@ -87,7 +72,6 @@ class AgendaService {
     }
   }
 
-  /// Fetch buffer settings per category
   Future<List<Map<String, dynamic>>> getBufferSettings() async {
     try {
       final response = await _supabase.from('buffer_settings').select().order('kategori');
@@ -98,8 +82,6 @@ class AgendaService {
     }
   }
 
-  /// Update buffer setting for a category (Admin only)
-  /// Calls RPC `update_buffer_setting`
   Future<void> updateBufferSetting(String kategori, int jumlahBuffer) async {
     try {
       await _supabase.rpc('update_buffer_setting', params: {
@@ -112,12 +94,11 @@ class AgendaService {
     }
   }
 
-  /// Get buffer status (total, available, used) for a specific date and category
   Future<Map<String, int>> getBufferStatusForPeriod(String kategori, DateTime date) async {
     try {
       final dateStr =
           '${date.year}-${date.month.toString().padLeft(2, '0')}-${date.day.toString().padLeft(2, '0')}';
-      
+
       var query = _supabase
           .from('agenda_buffers')
           .select('status, nomor, periode')
@@ -126,7 +107,7 @@ class AgendaService {
       if (kategori == 'surat_keluar') {
         query = query.eq('periode', dateStr);
       } else {
-        // Bulanan: match same year and month
+
         final startOfMonth = '${date.year}-${date.month.toString().padLeft(2, '0')}-01';
         final nextMonth = date.month == 12 ? DateTime(date.year + 1, 1, 1) : DateTime(date.year, date.month + 1, 1);
         final endOfMonth = '${nextMonth.year}-${nextMonth.month.toString().padLeft(2, '0')}-01';
@@ -151,7 +132,6 @@ class AgendaService {
     }
   }
 
-  /// Generate buffer space for a specific period
   Future<void> generateBufferForPeriod(String kategori, DateTime date) async {
     try {
       final dateStr =
@@ -166,8 +146,6 @@ class AgendaService {
     }
   }
 
-  /// Approve agenda item (Admin only)
-  /// Calls RPC `approve_agenda`
   Future<AgendaNumberModel> approveAgenda(int id) async {
     try {
       final response = await _supabase.rpc('approve_agenda', params: {
@@ -181,8 +159,6 @@ class AgendaService {
     }
   }
 
-  /// Reject agenda item (Admin only)
-  /// Calls RPC `reject_agenda`
   Future<AgendaNumberModel> rejectAgenda(int id, {String? catatan}) async {
     try {
       final response = await _supabase.rpc('reject_agenda', params: {
@@ -197,8 +173,6 @@ class AgendaService {
     }
   }
 
-  /// Update agenda draft details while status is 'menunggu' (Operator/Admin)
-  /// Calls RPC `update_agenda_draft`
   Future<AgendaNumberModel> updateAgendaDraft({
     required int id,
     required String kodeKlasifikasi,
@@ -222,10 +196,76 @@ class AgendaService {
     }
   }
 
-  /// Extract a user-friendly error message from Supabase exceptions
+  /// Mengambil riwayat surat yang dibatasi per bidang pengguna yang login.
+  /// Pembatasan dipaksa di sisi database (PostgreSQL RPC get_riwayat_surat_bidang atau server-side query),
+  /// bukan sekadar filtering di memori Flutter.
+  Future<List<AgendaNumberModel>> getRiwayatSuratBidang({
+    String? userBidang,
+    String? userId,
+    bool isAdmin = false,
+  }) async {
+    try {
+      // 1. Eksekusi RPC Security Definier di PostgreSQL (memaksa filter di database)
+      final response = await _supabase.rpc('get_riwayat_surat_bidang');
+      final list = (response as List)
+          .map((json) => AgendaNumberModel.fromJson(json as Map<String, dynamic>))
+          .toList();
+      return list;
+    } catch (_) {
+      // 2. Fallback: jika fungsi RPC belum di-apply di server database,
+      // lakukan database-level query langsung dengan klausa filter PostgREST
+      try {
+        if (isAdmin) {
+          final res = await _supabase
+              .from('agenda_numbers')
+              .select()
+              .order('created_at', ascending: false);
+          return (res as List)
+              .map((json) => AgendaNumberModel.fromJson(json as Map<String, dynamic>))
+              .toList();
+        }
+
+        final currentUid = userId ?? _supabase.auth.currentUser?.id;
+        var query = _supabase.from('agenda_numbers').select();
+
+        if (userBidang != null && userBidang.trim().isNotEmpty) {
+          final norm = userBidang.toLowerCase().trim();
+          String keyword = userBidang;
+          if (norm.contains('aptika') || norm.contains('aplikasi')) {
+            keyword = 'Aptika';
+          } else if (norm.contains('sandi') || norm.contains('keamanan')) {
+            keyword = 'Sandi';
+          } else if (norm.contains('komunikasi')) {
+            keyword = 'Komunikasi';
+          } else if (norm.contains('statistik') || norm.contains('data')) {
+            keyword = 'Statistik';
+          } else if (norm.contains('sekretariat')) {
+            keyword = 'Sekretariat';
+          }
+
+          if (currentUid != null) {
+            query = query.or('dibuat_oleh.eq.$currentUid,pemohon.ilike.%$keyword%');
+          } else {
+            query = query.ilike('pemohon', '%$keyword%');
+          }
+        } else if (currentUid != null) {
+          query = query.eq('dibuat_oleh', currentUid);
+        }
+
+        final res = await query.order('created_at', ascending: false);
+        return (res as List)
+            .map((json) => AgendaNumberModel.fromJson(json as Map<String, dynamic>))
+            .toList();
+      } catch (dbError) {
+        final message = _extractErrorMessage(dbError);
+        throw Exception(message);
+      }
+    }
+  }
+
   String _extractErrorMessage(dynamic error) {
     if (error is PostgrestException) {
-      // PostgrestException contains the RAISE EXCEPTION message
+
       final msg = error.message;
       if (msg.contains('FORBIDDEN')) {
         return 'Akses ditolak: Hanya Admin yang dapat mengonfigurasi buffer settings.';

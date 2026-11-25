@@ -2,17 +2,12 @@ import 'package:flutter/material.dart';
 import 'package:provider/provider.dart';
 import '../providers/auth_provider.dart';
 import '../services/agenda_service.dart';
+import '../utils/validators.dart';
 import '../widgets/popup_pilih_waktu.dart';
 import '../widgets/popup_pilih_tanggal.dart';
 import '../widgets/popup_hasil_nomor.dart';
 import '../theme/app_theme.dart';
 
-/// Form Buat Nomor Agenda — matching MONA Blue+White theme (design.md 9.1)
-///
-/// Light blue-tinted background, pill-shaped inputs with blue accents.
-/// Fields: Kategori (dropdown), Kode Klasifikasi, Perihal, Tujuan Surat, Pemohon.
-/// Validates all fields before enabling BUAT button.
-/// Flow: BUAT → Popup Pilih Waktu → (Hari Ini | Hari Lain→Calendar) → Popup Hasil
 class FormAgendaScreen extends StatefulWidget {
   const FormAgendaScreen({super.key});
 
@@ -23,7 +18,6 @@ class FormAgendaScreen extends StatefulWidget {
 class _FormAgendaScreenState extends State<FormAgendaScreen> {
   final _agendaService = AgendaService();
 
-  // Form controllers
   String? _selectedKategori;
   final _kodeKlasifikasiController = TextEditingController();
   final _perihalController = TextEditingController();
@@ -32,7 +26,6 @@ class _FormAgendaScreenState extends State<FormAgendaScreen> {
 
   bool _isLoading = false;
 
-  // Kategori options
   static const _kategoriOptions = [
     {'value': 'surat_keputusan', 'label': 'Surat Keputusan'},
     {'value': 'nota_dinas', 'label': 'Nota Dinas'},
@@ -48,40 +41,48 @@ class _FormAgendaScreenState extends State<FormAgendaScreen> {
     super.dispose();
   }
 
-  /// Check if all fields are filled
   bool get _isFormValid {
-    return _selectedKategori != null &&
-        _selectedKategori!.isNotEmpty &&
-        _kodeKlasifikasiController.text.trim().isNotEmpty &&
-        _perihalController.text.trim().isNotEmpty &&
-        _tujuanSuratController.text.trim().isNotEmpty &&
-        _pemohonController.text.trim().isNotEmpty;
+    return AgendaValidator.isFormFilled(
+      kategori: _selectedKategori,
+      kodeKlasifikasi: _kodeKlasifikasiController.text,
+      perihal: _perihalController.text,
+      tujuanSurat: _tujuanSuratController.text,
+      pemohon: _pemohonController.text,
+    );
   }
 
-  /// Main flow: BUAT button pressed
+  String? _validateForm() {
+    return AgendaValidator.validateAgendaForm(
+      kategori: _selectedKategori,
+      kodeKlasifikasi: _kodeKlasifikasiController.text,
+      perihal: _perihalController.text,
+      tujuanSurat: _tujuanSuratController.text,
+      pemohon: _pemohonController.text,
+    );
+  }
+
   Future<void> _onBuatPressed() async {
-    if (!_isFormValid) {
-      _showSnackBar('Semua field wajib diisi sebelum membuat nomor agenda.');
+    final validationError = _validateForm();
+    if (validationError != null) {
+      _showSnackBar(validationError);
       return;
     }
 
-    // Step 1: Show popup pilih waktu
     final waktu = await showPopupPilihWaktu(context);
-    if (waktu == null || !mounted) return; // User chose "Kembali"
+    if (waktu == null || !mounted) return;
 
     if (waktu == 'hari_ini') {
       await _issueHariIni();
     } else if (waktu == 'hari_lain') {
-      // Step 2: Show calendar popup
+
       if (!mounted) return;
       final tanggal = await showPopupPilihTanggal(context);
-      if (tanggal == null || !mounted) return; // User cancelled
+      if (tanggal == null || !mounted) return;
 
       await _issueBackdate(tanggal);
     }
   }
 
-  /// Issue nomor for today
   Future<void> _issueHariIni() async {
     setState(() => _isLoading = true);
 
@@ -97,7 +98,6 @@ class _FormAgendaScreenState extends State<FormAgendaScreen> {
       if (!mounted) return;
       setState(() => _isLoading = false);
 
-      // Show success popup
       await showPopupHasilNomor(
         context,
         isSuccess: true,
@@ -105,7 +105,7 @@ class _FormAgendaScreenState extends State<FormAgendaScreen> {
       );
 
       if (mounted) {
-        Navigator.of(context).pop(true); // Return to home & trigger refresh
+        Navigator.of(context).pop(true);
       }
     } catch (e) {
       if (!mounted) return;
@@ -113,7 +113,6 @@ class _FormAgendaScreenState extends State<FormAgendaScreen> {
 
       final errorMsg = e.toString().replaceAll('Exception: ', '');
 
-      // Show error popup
       await showPopupHasilNomor(
         context,
         isSuccess: false,
@@ -122,7 +121,6 @@ class _FormAgendaScreenState extends State<FormAgendaScreen> {
     }
   }
 
-  /// Issue backdate nomor
   Future<void> _issueBackdate(DateTime tanggal) async {
     setState(() => _isLoading = true);
 
@@ -139,7 +137,6 @@ class _FormAgendaScreenState extends State<FormAgendaScreen> {
       if (!mounted) return;
       setState(() => _isLoading = false);
 
-      // Show success popup
       await showPopupHasilNomor(
         context,
         isSuccess: true,
@@ -147,7 +144,7 @@ class _FormAgendaScreenState extends State<FormAgendaScreen> {
       );
 
       if (mounted) {
-        Navigator.of(context).pop(true); // Return to home & trigger refresh
+        Navigator.of(context).pop(true);
       }
     } catch (e) {
       if (!mounted) return;
@@ -155,7 +152,6 @@ class _FormAgendaScreenState extends State<FormAgendaScreen> {
 
       final errorMsg = e.toString().replaceAll('Exception: ', '');
 
-      // Show error popup (buffer habis, etc.)
       await showPopupHasilNomor(
         context,
         isSuccess: false,
@@ -182,14 +178,13 @@ class _FormAgendaScreenState extends State<FormAgendaScreen> {
       backgroundColor: AppTheme.surfaceAlt,
       body: Stack(
         children: [
-          // Main content
+
           SafeArea(
             child: Column(
               children: [
-                // ── Top bar ──
+
                 _buildTopBar(),
 
-                // ── Form content ──
                 Expanded(
                   child: SingleChildScrollView(
                     padding: const EdgeInsets.symmetric(
@@ -211,13 +206,12 @@ class _FormAgendaScreenState extends State<FormAgendaScreen> {
                       child: Column(
                         crossAxisAlignment: CrossAxisAlignment.start,
                         children: [
-                          // Kategori dropdown
+
                           _buildLabel('Pilih Kategori'),
                           const SizedBox(height: 6),
                           _buildKategoriDropdown(),
                           const SizedBox(height: 18),
 
-                          // Kode Klasifikasi
                           _buildLabel('Masukkan Kode Klasifikasinya'),
                           const SizedBox(height: 6),
                           _buildTextField(
@@ -227,7 +221,6 @@ class _FormAgendaScreenState extends State<FormAgendaScreen> {
                           ),
                           const SizedBox(height: 18),
 
-                          // Perihal
                           _buildLabel('Masukkan Perihal'),
                           const SizedBox(height: 6),
                           _buildTextField(
@@ -237,7 +230,6 @@ class _FormAgendaScreenState extends State<FormAgendaScreen> {
                           ),
                           const SizedBox(height: 18),
 
-                          // Tujuan Surat
                           _buildLabel('Masukkan Tujuan Surat'),
                           const SizedBox(height: 6),
                           _buildTextField(
@@ -247,7 +239,6 @@ class _FormAgendaScreenState extends State<FormAgendaScreen> {
                           ),
                           const SizedBox(height: 18),
 
-                          // Pemohon
                           Builder(
                             builder: (context) {
                               final auth = context.watch<AuthProvider>();
@@ -303,7 +294,6 @@ class _FormAgendaScreenState extends State<FormAgendaScreen> {
                           ),
                           const SizedBox(height: 32),
 
-                          // BUAT button section
                           Center(
                             child: Column(
                               children: [
@@ -331,7 +321,6 @@ class _FormAgendaScreenState extends State<FormAgendaScreen> {
             ),
           ),
 
-          // Loading overlay
           if (_isLoading) _buildLoadingOverlay(),
         ],
       ),
@@ -433,7 +422,7 @@ class _FormAgendaScreenState extends State<FormAgendaScreen> {
       child: TextField(
         controller: controller,
         style: const TextStyle(color: AppTheme.textPrimary, fontSize: 14, fontWeight: FontWeight.w500),
-        onChanged: (_) => setState(() {}), // Trigger rebuild for validation
+        onChanged: (_) => setState(() {}),
         decoration: InputDecoration(
           prefixIcon: Icon(prefixIcon, color: AppTheme.primary, size: 20),
           hintText: hint,
